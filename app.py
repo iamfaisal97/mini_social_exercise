@@ -870,73 +870,231 @@ def loop_color(user_id):
 # ----- Functions to be implemented are below
 
 # Task 3.1
-def recommend(user_id, filter_following):
-    """
-    Args:
-        user_id: The ID of the current user.
-        filter_following: Boolean, True if we only want to see recommendations from followed users.
 
-    Returns:
-        A list of 5 recommended posts, in reverse-chronological order.
+def recommend_simple(user_id: int | None, filter_following: bool):
+   
+    db = get_db()
 
-    To test whether your recommendation algorithm works, let's pretend we like the DIY topic. Here are some users that often post DIY comment and a few example posts. Make sure your account did not engage with anything else. You should test your algorithm with these and see if your recommendation algorithm picks up on your interest in DIY and starts showing related content.
-    
-    Users: @starboy99, @DancingDolphin, @blogger_bob
-    Posts: 1810, 1875, 1880, 2113
-    
-    Materials: 
-    - https://www.nvidia.com/en-us/glossary/recommendation-system/
-    - http://www.configworks.com/mz/handout_recsys_sac2010.pdf
-    - https://www.researchgate.net/publication/227268858_Recommender_Systems_Handbook
-    """
+    # 1) Following tab: show recent posts from followed users
+    if filter_following and user_id:
+        return query_db(
+            """
+            SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
+            FROM posts p
+            JOIN users u ON p.user_id = u.id
+            WHERE p.user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?)
+            ORDER BY p.created_at DESC
+            LIMIT 5
+            """,
+            (user_id,)
+        )
 
-    recommended_posts = {} 
+    # 2) Anonymous users: show popular recent posts
+    if not user_id:
+        return query_db(
+            """
+            SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
+            FROM posts p
+            JOIN users u ON p.user_id = u.id
+            LEFT JOIN (SELECT post_id, COUNT(*) AS total FROM reactions GROUP BY post_id) r
+            ON r.post_id = p.id
+            ORDER BY COALESCE(r.total,0) DESC, p.created_at DESC
+            LIMIT 5
+            """
+        )
 
-    return recommended_posts;
+    # 3) Personalized feed for logged-in users
+
+    # Followed users
+    followed = {r['followed_id'] for r in query_db(
+        "SELECT followed_id FROM follows WHERE follower_id = ?", (user_id,)
+    )}
+
+    # Posts user already reacted to
+    seen = {r['post_id'] for r in query_db(
+        "SELECT post_id FROM reactions WHERE user_id = ?", (user_id,)
+    )}
+
+    # Extract keywords from liked posts
+    liked_posts = query_db(
+        """
+        SELECT p.content
+        FROM posts p
+        JOIN reactions r ON r.post_id = p.id
+        WHERE r.user_id = ? AND r.type IN ('like','love','favorite','upvote','thumbs_up')
+        """,
+        (user_id,)
+    )
+
+    import re
+    from collections import Counter
+    token_re = re.compile(r"[A-Za-z]{3,}")
+    stop_words = {"the","and","for","with","this","that","from","your","you","have","are","was","were","about"}
+    keywords = Counter()
+    for post in liked_posts:
+        for word in token_re.findall((post['content'] or '').lower()):
+            if word not in stop_words:
+                keywords[word] += 1
+    top_keywords = set([w for w, _ in keywords.most_common(10)])
+
+    # Candidate posts (exclude user's own and already seen)
+    candidates = query_db(
+        """
+        SELECT p.id, p.content, p.created_at, u.username, u.id AS user_id,
+               COALESCE(r.total,0) AS popularity
+        FROM posts p
+        JOIN users u ON p.user_id = u.id
+        LEFT JOIN (SELECT post_id, COUNT(*) AS total FROM reactions GROUP BY post_id) r
+        ON r.post_id = p.id
+        WHERE p.user_id != ? AND p.id NOT IN (
+            SELECT post_id FROM reactions WHERE user_id = ?
+        )
+        ORDER BY p.created_at DESC
+        LIMIT 200
+        """,
+        (user_id, user_id)
+    )
+
+    # Simple scoring: recency + followed bonus + popularity + keyword matches
+    from datetime import datetime
+    import math
+    def age_score(created_at):
+        try:
+            age_days = (datetime.utcnow() - datetime.fromisoformat(str(created_at).replace(" ", "T"))).days
+            return math.exp(-age_days / 14)
+        except:
+            return 0
+
+    scored = []
+    for post in candidates:
+        score = age_score(post['created_at'])
+        if post['user_id'] in followed:
+            score += 1.2
+        score += 0.3 * math.log1p(post['popularity'])
+        content = (post['content'] or '').lower()
+        score += 0.1 * sum(1 for kw in top_keywords if kw in content)
+        scored.append((score, post))
+
+    # Return top 5 posts
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top_posts = [p for _, p in scored[:5]]
+
+    # Fallback: pad with recent popular posts if <5
+    if len(top_posts) < 5:
+        pad = query_db(
+            """
+            SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
+            FROM posts p
+            JOIN users u ON p.user_id = u.id
+            ORDER BY COALESCE((SELECT COUNT(*) FROM reactions WHERE post_id = p.id),0) DESC, p.created_at DESC
+            LIMIT ?
+            """,
+            (5 - len(top_posts),)
+        )
+        top_posts.extend(pad[:5 - len(top_posts)])
+
+    return top_posts
+
 
 # Task 3.2
-def user_risk_analysis(user_id):
-    """
-    Args:
-        user_id: The ID of the user on which we perform risk analysis.
+def user_risk_analysis(user_id: int) -> float:
+   
+    import re
 
-    Returns:
-        A float number score showing the risk associated with this user. There are no strict rules or bounds to this score, other than that a score of less than 1.0 means no risk, 1.0 to 3.0 is low risk, 3.0 to 5.0 is medium risk and above 5.0 is high risk. (An upper bound of 5.0 is applied to this score elsewhere in the codebase) 
-        
-        You will be able to check the scores by logging in with the administrator account:
-            username: admin
-            password: admin
-        Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
-    """
-    
-    score = 0
+    # Fetch last 50 posts and comments
+    posts = query_db("SELECT content FROM posts WHERE user_id=? ORDER BY id DESC LIMIT 50", (user_id,))
+    comments = query_db("SELECT content FROM comments WHERE user_id=? ORDER BY id DESC LIMIT 50", (user_id,))
+    items = [p["content"] for p in posts] + [c["content"] for c in comments]
 
-    return score;
+    if not items:
+        return 0.0
+
+    flagged_count = 0
+    total_severity = 0.0
+    url_pattern = re.compile(r"https?://|www\.", re.IGNORECASE)
+
+    for content in items:
+        content = content or ""
+        _, severity = moderate_content(content)
+        total_severity += severity
+        if severity > 0:
+            flagged_count += 1
+
+    # Base score: proportion of flagged items
+    moderation_rate = flagged_count / len(items)
+    score = 3.0 * moderation_rate
+
+    avg_severity = total_severity / len(items)
+    score += 0.5 * avg_severity
+
+    recent20 = items[:20]
+    links_count = sum(1 for c in recent20 if url_pattern.search(c or ""))
+    if links_count / max(1, len(recent20)) >= 0.3:
+        score += 0.3
+
+    return float(score)
+
 
     
 # Task 3.3
-def moderate_content(content):
-    """
-    Args
-        content: the text content of a post or comment to be moderated.
-        
-    Returns: 
-        A tuple containing the moderated content (string) and a severity score (float). There are no strict rules or bounds to the severity score, other than that a score of less than 1.0 means no risk, 1.0 to 3.0 is low risk, 3.0 to 5.0 is medium risk and above 5.0 is high risk.
+def moderate_content(content: str | None):
     
-    This function moderates a string of content and calculates a severity score based on
-    rules loaded from the 'censorship.dat' file. These are already loaded as TIER1_WORDS, TIER2_PHRASES and TIER3_WORDS. Tier 1 corresponds to strong profanity, Tier 2 to scam/spam phrases and Tier 3 to mild profanity.
-    
-    You will be able to check the scores by logging in with the administrator account:
-            username: admin
-            password: admin
-    Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
-    """
 
-    moderated_content = content
-    score = 0
-    
-    return moderated_content, score
+    if not content:
+        return content, 0.0
 
+    redacted = content
+    score = 0.0
+
+    # --- Helper to mask matches ---
+    def mask(match):
+        return "[censored]"
+
+
+
+    # --- Tier 1: severe words ---
+    if TIER1_WORDS:
+        pat = re.compile(r"\b(" + "|".join(map(re.escape, TIER1_WORDS)) + r")\b", re.IGNORECASE)
+        hits = list(pat.finditer(redacted))
+        score += 2.0 * len(hits)
+        redacted = pat.sub(mask, redacted)
+
+    # --- Tier 2: spam/scam phrases ---
+    for ph in TIER2_PHRASES:
+        if not ph:
+            continue
+        pat = re.compile(re.escape(ph), re.IGNORECASE)
+        hits = pat.findall(redacted)
+        score += 1.0 * len(hits)
+        redacted = pat.sub("[censored]", redacted)
+
+    # --- Tier 3: mild words ---
+    if TIER3_WORDS:
+        pat = re.compile(r"\b(" + "|".join(map(re.escape, TIER3_WORDS)) + r")\b", re.IGNORECASE)
+        hits = list(pat.finditer(redacted))
+        score += 0.5 * len(hits)
+        redacted = pat.sub(mask, redacted)
+
+    
+    if re.search(r"\b[A-Z]{6,}\b", redacted):
+        score += 0.2
+
+ 
+    if re.search(r"https?://|www\.", redacted, re.IGNORECASE):
+        score += 0.2
+
+   
+    email_pat = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
+    phone_pat = re.compile(r"(?:\+?\d{1,3}[-.\s]?)?(?:\(?\d{2,4}\)?[-.\s]?)?\d{3}[-.\s]?\d{3,4}")
+
+    email_hits = email_pat.findall(redacted)
+    phone_hits = phone_pat.findall(redacted)
+
+    score += 0.5 * (len(email_hits) + len(phone_hits))
+    redacted = email_pat.sub("[censored]", redacted)
+    redacted = phone_pat.sub("[censored]", redacted)
+
+    return redacted, float(score)
 
 if __name__ == '__main__':
     app.run(debug=True, port=8080)
