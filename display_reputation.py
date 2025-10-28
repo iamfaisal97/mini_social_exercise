@@ -1,4 +1,3 @@
-# Step 4: Display scores
 cursor.execute("SELECT username, reputation_score FROM users")
 for username, score in cursor.fetchall():
     print(f"{username}: {score}")

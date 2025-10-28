@@ -18,7 +18,6 @@ def calculate_reputation(user_id):
     cursor.execute("UPDATE users SET reputation_score=? WHERE id=?", (total_score, user_id))
     conn.commit()
 
-# Step 3: Assign to all users
 cursor.execute("SELECT id FROM users")
 user_ids = [row[0] for row in cursor.fetchall()]
 
