@@ -8,6 +8,7 @@ import hashlib
 import re
 from datetime import datetime
 
+
 app = Flask(__name__)
 app.secret_key = '123456789' 
 DATABASE = 'database.sqlite'
@@ -1099,3 +1100,35 @@ def moderate_content(content: str | None):
 if __name__ == '__main__':
     app.run(debug=True, port=8080)
 
+
+#Task 4.4
+app = Flask(__name__)
+
+def get_user(user_id):
+    conn = sqlite3.connect("database.sqlite")
+    cursor = conn.cursor()
+    cursor.execute("SELECT username, reputation_score FROM users WHERE id=?", (user_id,))
+    user = cursor.fetchone()
+    conn.close()
+    return user
+
+@app.route("/profile/<int:user_id>")
+def profile(user_id):
+    user = get_user(user_id)
+    if user:
+        username, reputation = user
+        return render_template("profile.html", username=username, reputation=reputation)
+    else:
+        return "User not found", 404
+
+@app.route("/all_users")
+def all_users():
+    conn = sqlite3.connect("database.sqlite")
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, username, reputation_score FROM users")
+    users = cursor.fetchall()
+    conn.close()
+    return render_template("all_users.html", users=users)
+
+if __name__ == "__main__":
+    app.run(debug=True)
